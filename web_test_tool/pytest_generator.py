@@ -151,11 +151,11 @@ class TestPageElements:
             try:
                 screenshot_dir = '{screenshot_dir}'
                 os.makedirs(screenshot_dir, exist_ok=True)
-                screenshot_path = os.path.join(screenshot_dir, f"{test_id}_failure.png")
+                screenshot_path = os.path.join(screenshot_dir, "test_{test_id}_failure.png")
                 page.screenshot(path=screenshot_path)
-                logger.info(f"已保存失败截图: {screenshot_path}")
+                logger.info("已保存失败截图: " + screenshot_path)
             except Exception as screenshot_error:
-                logger.warning(f"截图失败: {str(screenshot_error)}")
+                logger.warning("截图失败: " + str(screenshot_error))
             raise
 """.format(
             test_id=test_id,
