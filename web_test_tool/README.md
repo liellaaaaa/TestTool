@@ -2,6 +2,7 @@
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 cd web_test_tool
 .venv\Scripts\activate
+python main.py
 
 ## 1. 工具简介
 
