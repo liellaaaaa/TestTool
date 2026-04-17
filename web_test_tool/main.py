@@ -68,7 +68,7 @@ def main():
     print(f"已选择: {account_type}账号 ({username} / {password})")
     
     # 分析页面元素
-    analyzer = PageAnalyzer(url, config)
+    analyzer = PageAnalyzer(url, config, username, password)
     test_points = analyzer.analyze_page()
     
     if not test_points:

@@ -2,11 +2,13 @@ from playwright.sync_api import sync_playwright
 import logging
 
 class PageAnalyzer:
-    def __init__(self, url, config=None):
+    def __init__(self, url, config=None, username=None, password=None):
         self.url = url
         self.test_points = []
         self.logger = logging.getLogger(__name__)
         self.config = config
+        self.username = username
+        self.password = password
         # 默认配置
         self.browser_type = config.get('DEFAULT', 'browser', fallback='chromium') if config else 'chromium'
         self.headless = config.getboolean('DEFAULT', 'headless', fallback=False) if config else False
@@ -22,6 +24,25 @@ class PageAnalyzer:
                 # 设置超时时间
                 page.set_default_timeout(self.page_load_timeout * 1000)
                 page.goto(self.url)
+                
+                # ========== 新增自动登录逻辑 ==========
+                if self.username and self.password:
+                    # 适配登录页选择器，根据实际情况修改
+                    try:
+                        # 等待用户名输入框出现（判断是否在登录页）
+                        page.wait_for_selector("input[type='text'], input[name='username'], input#username", timeout=3000)
+                        # 填充账号密码
+                        page.fill("input[type='text'], input[name='username'], input#username", self.username)
+                        page.fill("input[type='password'], input[name='password'], input#password", self.password)
+                        # 点击登录按钮
+                        login_button_selector = "button[type='submit'], input[type='submit'], button:has-text('登录'), button:has-text('Login')"
+                        page.click(login_button_selector)
+                        # 等待登录完成跳转
+                        page.wait_for_navigation(timeout=10000)
+                        print("✅ 自动登录成功")
+                    except Exception as e:
+                        print(f"ℹ️ 未检测到登录页或登录失败: {str(e)}")
+                # ======================================
                 
                 # 分析可交互元素
                 self._analyze_interactive_elements(page)
