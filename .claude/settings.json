@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install -r requirements.txt)",
+      "Bash(playwright install)",
+      "Bash(pip install *)",
+      "Bash(pip list)",
+      "Bash(pip freeze)",
+      "Bash(python main.py)",
+      "Bash(pytest tests/ -v)",
+      "Bash(git push)",
+      "Bash(git commit *)"
+    ]
+  }
+}
