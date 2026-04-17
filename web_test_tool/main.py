@@ -34,7 +34,7 @@ logging.basicConfig(
     level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('test.log'),
+        logging.FileHandler('test.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -43,6 +43,29 @@ def main():
     """主函数"""
     # 输入目标URL
     url = input("请输入要测试的网页URL: ").strip()
+    
+    # 选择测试账号
+    print("请选择要使用的测试账号:")
+    print("1. 管理员账号 (test001 / 123456)")
+    print("2. 普通用户账号 (test002 / 123456)")
+    account_choice = input("请输入选择 (1/2): ").strip()
+    
+    # 根据选择设置账号信息
+    if account_choice == "1":
+        username = "test001"
+        password = "123456"
+        account_type = "admin"
+    elif account_choice == "2":
+        username = "test002"
+        password = "123456"
+        account_type = "user"
+    else:
+        print("无效选择，默认使用普通用户账号")
+        username = "test002"
+        password = "123456"
+        account_type = "user"
+    
+    print(f"已选择: {account_type}账号 ({username} / {password})")
     
     # 分析页面元素
     analyzer = PageAnalyzer(url, config)
@@ -57,11 +80,11 @@ def main():
     
     # 生成pytest测试文件
     if config.getboolean('TEST', 'generate_pytest', fallback=True):
-        generate_pytest_tests(url, test_points, config)
+        generate_pytest_tests(url, test_points, config, username, password)
         print("\n已生成pytest测试文件: tests/test_page_elements.py")
     
     # 运行测试
-    runner = TestRunner(url, test_points, config)
+    runner = TestRunner(url, test_points, config, username, password)
     selected_test_ids = runner.select_tests()
     runner.run_tests(selected_test_ids)
 

@@ -3,11 +3,13 @@ import os
 from playwright.sync_api import sync_playwright
 
 class TestRunner:
-    def __init__(self, url, test_points, config=None):
+    def __init__(self, url, test_points, config=None, username=None, password=None):
         self.url = url
         self.test_points = test_points
         self.logger = logging.getLogger(__name__)
         self.config = config
+        self.username = username if username else "test002"
+        self.password = password if password else "123456"
         # 从配置中读取设置
         self.screenshot_dir = config.get('DEFAULT', 'screenshot_dir', fallback='screenshots') if config else 'screenshots'
         self.report_dir = config.get('DEFAULT', 'report_dir', fallback='reports') if config else 'reports'
@@ -143,9 +145,23 @@ class TestRunner:
                         # 获取按钮文本
                         button_text = button.text_content().strip() if button.text_content() else '无文本'
                         self.logger.info(f"找到按钮: {button_text}")
+                        # 如果是登录按钮，先输入账号密码
+                        if "login-btn" in selector:
+                            # 输入用户名
+                            username_input = page.query_selector("input[placeholder='请输入用户名或邮箱']")
+                            if username_input:
+                                username_input.fill(self.username)
+                                page.wait_for_timeout(500)
+                                self.logger.info(f"已输入用户名: {self.username}")
+                            # 输入密码
+                            password_input = page.query_selector("input[placeholder='请输入密码']")
+                            if password_input:
+                                password_input.fill(self.password)
+                                page.wait_for_timeout(500)
+                                self.logger.info("已输入密码")
                         button.click()
                         # 等待可能的页面变化
-                        page.wait_for_timeout(2000)
+                        page.wait_for_load_state('networkidle', timeout=self.page_load_timeout * 1000)
                         self.logger.info(f"测试通过: {test_id} - 按钮点击成功")
                     else:
                         raise Exception(f"元素未找到 - 选择器: {selector}")
