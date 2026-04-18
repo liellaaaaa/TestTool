@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from playwright.sync_api import sync_playwright
 
 class TestRunner:
@@ -125,6 +126,10 @@ class TestRunner:
         element_type = test_point['type']
         selector = test_point['selector']
         page_url = test_point.get('page_url', self.url)  # 获取测试点所属页面URL，默认使用初始URL
+
+        # 优化选择器，避开动态ID
+        selector = self._optimize_selector(test_point)
+
         self.logger.info(f"开始测试: {test_id} - {element_type} - 页面: {page_url} - 选择器: {selector}")
 
         try:
@@ -143,16 +148,22 @@ class TestRunner:
                 if self.username and self.password:
                     try:
                         # 检查是否在登录页
-                        login_input = page.query_selector("input[type='text'], input[name='username'], input#username")
+                        # 优先使用placeholder匹配，更通用
+                        username_selector = "input[placeholder*='用户名'], input[placeholder*='账号'], input[placeholder*='邮箱'], input[name='username'], input#username, input[type='text']"
+                        password_selector = "input[placeholder*='密码'], input[name='password'], input#password, input[type='password']"
+
+                        # 等待登录输入框出现，最多等3秒
+                        login_input = page.wait_for_selector(username_selector, timeout=3000)
                         if login_input and login_input.is_visible():
                             # 填充账号密码
-                            page.fill("input[type='text'], input[name='username'], input#username", self.username)
-                            page.fill("input[type='password'], input[name='password'], input#password", self.password)
+                            page.fill(username_selector, self.username)
+                            page.fill(password_selector, self.password)
                             # 点击登录按钮
                             login_button_selector = "button[type='submit'], input[type='submit'], button:has-text('登录'), button:has-text('Login')"
                             page.click(login_button_selector)
-                            # 等待登录完成跳转
-                            page.wait_for_navigation(timeout=10000)
+                            # 等待登录完成跳转（和分析页面逻辑完全一致）
+                            page.wait_for_load_state('networkidle', timeout=10000)
+                            page.wait_for_timeout(2000)  # 额外等待页面渲染完成，和分析页面保持一致
                             self.logger.info("✅ 自动登录成功")
                     except Exception as e:
                         self.logger.info(f"ℹ️ 未检测到登录页或登录失败: {str(e)}")
@@ -162,10 +173,11 @@ class TestRunner:
                     self.logger.info(f"🔄 跳转到测试页面: {page_url}")
                     page.goto(page_url)
                     page.wait_for_load_state('networkidle', timeout=self.page_load_timeout * 1000)
+                    page.wait_for_timeout(1000)  # 等待页面渲染完成
                 
                 if element_type == 'button':
                     # 测试按钮点击
-                    button = page.query_selector(selector)
+                    button = page.wait_for_selector(selector, timeout=5000)  # 最多等待5秒元素出现
                     if button:
                         # 获取按钮文本
                         button_text = button.text_content().strip() if button.text_content() else '无文本'
@@ -193,7 +205,7 @@ class TestRunner:
                 
                 elif element_type == 'input':
                     # 测试输入框
-                    input_elem = page.query_selector(selector)
+                    input_elem = page.wait_for_selector(selector, timeout=5000)  # 最多等待5秒元素出现
                     if input_elem:
                         # 获取输入框类型和占位符
                         input_type = input_elem.get_attribute('type') or 'text'
@@ -213,7 +225,7 @@ class TestRunner:
                 
                 elif element_type == 'link':
                     # 测试链接点击
-                    link = page.query_selector(selector)
+                    link = page.wait_for_selector(selector, timeout=5000)  # 最多等待5秒元素出现
                     if link:
                         # 获取链接文本和href
                         link_text = link.text_content().strip() if link.text_content() else '无文本'
@@ -234,7 +246,7 @@ class TestRunner:
                 
                 elif element_type in ['checkbox', 'radio']:
                     # 测试复选框和单选按钮
-                    input_elem = page.query_selector(selector)
+                    input_elem = page.wait_for_selector(selector, timeout=5000)  # 最多等待5秒元素出现
                     if input_elem:
                         # 获取元素信息
                         name = input_elem.get_attribute('name') or ''
@@ -254,7 +266,7 @@ class TestRunner:
                 
                 elif element_type == 'select':
                     # 测试下拉菜单
-                    select_elem = page.query_selector(selector)
+                    select_elem = page.wait_for_selector(selector, timeout=5000)  # 最多等待5秒元素出现
                     if select_elem:
                         # 获取元素信息
                         name = select_elem.get_attribute('name') or ''
@@ -273,7 +285,7 @@ class TestRunner:
                 
                 elif element_type == 'textarea':
                     # 测试文本域
-                    textarea_elem = page.query_selector(selector)
+                    textarea_elem = page.wait_for_selector(selector, timeout=5000)  # 最多等待5秒元素出现
                     if textarea_elem:
                         # 获取元素信息
                         name = textarea_elem.get_attribute('name') or ''
@@ -294,7 +306,7 @@ class TestRunner:
                 
                 elif element_type == 'form':
                     # 测试表单
-                    form_elem = page.query_selector(selector)
+                    form_elem = page.wait_for_selector(selector, timeout=5000)  # 最多等待5秒元素出现
                     if form_elem:
                         # 获取元素信息
                         action = form_elem.get_attribute('action') or ''
@@ -347,6 +359,105 @@ class TestRunner:
         # 生成测试报告
         self.generate_test_report()
     
+    def _optimize_selector(self, test_point):
+        """优化选择器，避开动态ID，优先使用属性选择器或文本定位"""
+        element_type = test_point['type']
+        selector = test_point['selector']
+
+        # 检查是否包含动态ID（如el-id-数字-数字）
+        if re.search(r'el-id-\d+-\d+', selector):
+            # 根据元素类型生成更稳定的选择器
+            if element_type == 'input':
+                # 对于输入框，优先使用placeholder属性
+                if 'placeholder' in test_point and test_point['placeholder']:
+                    placeholder = test_point['placeholder']
+                    return f"input[placeholder='{placeholder}']"
+                # 如果没有placeholder，使用type属性
+                elif 'input_type' in test_point and test_point['input_type']:
+                    input_type = test_point['input_type']
+                    return f"input[type='{input_type}']"
+                # 否则使用class选择器（去掉ID部分）
+                else:
+                    # 提取class部分
+                    classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                    if classes:
+                        return f"input.{'.'.join(classes)}"
+                    return selector
+
+            elif element_type == 'button':
+                # 对于按钮，优先使用文本内容
+                if 'text' in test_point and test_point['text']:
+                    text = test_point['text']
+                    return f"button:has-text('{text}')"
+                # 如果没有文本，使用class选择器（去掉ID部分）
+                else:
+                    classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                    if classes:
+                        return f"button.{'.'.join(classes)}"
+                    return selector
+
+            elif element_type == 'link':
+                # 对于链接，优先使用文本内容
+                if 'text' in test_point and test_point['text']:
+                    text = test_point['text']
+                    return f"a:has-text('{text}')"
+                # 如果没有文本，使用class选择器（去掉ID部分）
+                else:
+                    classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                    if classes:
+                        return f"a.{'.'.join(classes)}"
+                    return selector
+
+            elif element_type == 'checkbox':
+                # 对于复选框，使用class选择器（去掉ID部分）
+                classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                if classes:
+                    return f"input[type='checkbox'].{'.'.join(classes)}"
+                return selector
+
+            elif element_type == 'radio':
+                # 对于单选按钮，使用class选择器（去掉ID部分）
+                classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                if classes:
+                    return f"input[type='radio'].{'.'.join(classes)}"
+                return selector
+
+            elif element_type == 'select':
+                # 对于下拉菜单，使用class选择器（去掉ID部分）
+                classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                if classes:
+                    return f"select.{'.'.join(classes)}"
+                return selector
+
+            elif element_type == 'textarea':
+                # 对于文本域，优先使用placeholder属性
+                if 'placeholder' in test_point and test_point['placeholder']:
+                    placeholder = test_point['placeholder']
+                    return f"textarea[placeholder='{placeholder}']"
+                # 如果没有placeholder，使用class选择器（去掉ID部分）
+                else:
+                    classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                    if classes:
+                        return f"textarea.{'.'.join(classes)}"
+                    return selector
+
+            elif element_type == 'form':
+                # 对于表单，使用class选择器（去掉ID部分）
+                classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                if classes:
+                    return f"form.{'.'.join(classes)}"
+                return selector
+
+            else:
+                # 对于其他元素，使用class选择器（去掉ID部分）
+                classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
+                if classes:
+                    return f"{element_type}.{'.'.join(classes)}"
+                return selector
+
+        # 如果不包含动态ID，直接返回原选择器
+        return selector
+
     def generate_test_report(self):
         """生成HTML格式的测试报告"""
         import datetime

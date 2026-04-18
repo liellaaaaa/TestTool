@@ -1,11 +1,12 @@
 import os
 import re
+from urllib.parse import urlparse
 
 def optimize_selector(test_point):
     """优化选择器，避开动态ID，优先使用属性选择器或文本定位"""
     element_type = test_point['type']
     selector = test_point['selector']
-    
+
     # 检查是否包含动态ID（如el-id-数字-数字）
     if re.search(r'el-id-\d+-\d+', selector):
         # 根据元素类型生成更稳定的选择器
@@ -25,7 +26,7 @@ def optimize_selector(test_point):
                 if classes:
                     return f"input.{'.'.join(classes)}"
                 return selector
-        
+
         elif element_type == 'button':
             # 对于按钮，优先使用文本内容
             if 'text' in test_point and test_point['text']:
@@ -37,7 +38,7 @@ def optimize_selector(test_point):
                 if classes:
                     return f"button.{'.'.join(classes)}"
                 return selector
-        
+
         elif element_type == 'link':
             # 对于链接，优先使用文本内容
             if 'text' in test_point and test_point['text']:
@@ -49,28 +50,28 @@ def optimize_selector(test_point):
                 if classes:
                     return f"a.{'.'.join(classes)}"
                 return selector
-        
+
         elif element_type == 'checkbox':
             # 对于复选框，使用class选择器（去掉ID部分）
             classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
             if classes:
                 return f"input[type='checkbox'].{'.'.join(classes)}"
             return selector
-        
+
         elif element_type == 'radio':
             # 对于单选按钮，使用class选择器（去掉ID部分）
             classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
             if classes:
                 return f"input[type='radio'].{'.'.join(classes)}"
             return selector
-        
+
         elif element_type == 'select':
             # 对于下拉菜单，使用class选择器（去掉ID部分）
             classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
             if classes:
                 return f"select.{'.'.join(classes)}"
             return selector
-        
+
         elif element_type == 'textarea':
             # 对于文本域，优先使用placeholder属性
             if 'placeholder' in test_point and test_point['placeholder']:
@@ -82,38 +83,64 @@ def optimize_selector(test_point):
                 if classes:
                     return f"textarea.{'.'.join(classes)}"
                 return selector
-        
+
         elif element_type == 'form':
             # 对于表单，使用class选择器（去掉ID部分）
             classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
             if classes:
                 return f"form.{'.'.join(classes)}"
             return selector
-        
+
         else:
             # 对于其他元素，使用class选择器（去掉ID部分）
             classes = re.findall(r'\.([a-zA-Z0-9_-]+)', selector)
             if classes:
                 return f"{element_type}.{'.'.join(classes)}"
             return selector
-    
+
     # 如果不包含动态ID，直接返回原选择器
     return selector
 
 def generate_pytest_tests(url, test_points, config=None, username=None, password=None):
-    """生成pytest测试文件"""
+    """生成pytest测试文件 - 使用参数化测试，避免重复代码"""
     # 创建tests目录
     os.makedirs('tests', exist_ok=True)
-    
+
     # 从配置中读取设置
     browser_type = config.get('DEFAULT', 'browser', fallback='chromium') if config else 'chromium'
     headless = config.getboolean('DEFAULT', 'headless', fallback=True) if config else True
     page_load_timeout = int(config.get('DEFAULT', 'page_load_timeout', fallback='30')) if config else 30
     log_level = config.get('DEFAULT', 'log_level', fallback='INFO') if config else 'INFO'
     screenshot_dir = config.get('DEFAULT', 'screenshot_dir', fallback='screenshots') if config else 'screenshots'
-    
-    # 构建测试文件内容
-    test_file_content = f"""
+
+    # 过滤掉登录页面的测试点，只保留登录后的页面测试点（放宽规则）
+    filtered_test_points = []
+    for tp in test_points:
+        page_url = tp.get('page_url', '')
+        # 只排除纯登录页面，带redirect或已经有业务元素的页面不排除
+        if not (('login' in page_url.lower() or 'signin' in page_url.lower()) and 'redirect' not in page_url.lower()):
+            # 优化选择器
+            tp['optimized_selector'] = optimize_selector(tp)
+            filtered_test_points.append(tp)
+
+    if not filtered_test_points:
+        print("⚠️  没有找到登录后的页面测试点")
+        return None
+
+    # 构建参数化测试用例列表
+    test_cases = []
+    for i, tp in enumerate(filtered_test_points, 1):
+        test_cases.append({
+            'id': tp['id'],
+            'type': tp['type'],
+            'page_url': tp.get('page_url', url),
+            'selector': tp['optimized_selector'],
+            'priority': tp['priority'],
+            'meta': {k: v for k, v in tp.items() if k not in ['id', 'type', 'selector', 'priority']}
+        })
+
+    # 手动构建测试文件内容，避免字符串嵌套问题
+    test_file_content = '''
 import pytest
 from playwright.sync_api import sync_playwright
 import logging
@@ -121,7 +148,7 @@ import os
 
 # 配置日志
 logging.basicConfig(
-    level=logging.{log_level.upper()},
+    level=logging.{},
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('test.log', encoding='utf-8'),
@@ -135,188 +162,163 @@ class TestPageElements:
     @pytest.fixture(scope="class")
     def page(self):
         with sync_playwright() as p:
-            browser = p.{browser_type}.launch(headless={headless})
+            browser = p.{}.launch(headless={})
             page = browser.new_page()
-            page.set_default_timeout({page_load_timeout} * 1000)
-            page.goto("{url}")
-            page.wait_for_load_state('networkidle', timeout={page_load_timeout} * 1000)
+            page.set_default_timeout({} * 1000)
 
             # 自动登录
-            username = "{username}"
-            password = "{password}"
-            if username and password:
-                try:
-                    # 检查是否在登录页
-                    login_input = page.query_selector("input[type='text'], input[name='username'], input#username")
-                    if login_input and login_input.is_visible():
-                        # 填充账号密码
-                        page.fill("input[type='text'], input[name='username'], input#username", username)
-                        page.fill("input[type='password'], input[name='password'], input#password", password)
-                        # 点击登录按钮
-                        login_button_selector = "button[type='submit'], input[type='submit'], button:has-text('登录'), button:has-text('Login')"
-                        page.click(login_button_selector)
-                        # 等待登录完成跳转
-                        page.wait_for_navigation(timeout=10000)
-                        logger.info("✅ 自动登录成功")
-                except Exception as e:
-                    logger.info(f"ℹ️ 未检测到登录页或登录失败: {str(e)}")
+            self._auto_login(page)
 
             yield page
             browser.close()
 
-""".format(
-    url=url,
-    browser_type=browser_type,
-    headless=headless,
-    page_load_timeout=page_load_timeout,
-    log_level=log_level
-).strip()
-    
-    # 为每个测试点生成测试方法
-    for i, test_point in enumerate(test_points, 1):
-        test_id = test_point['id']
-        element_type = test_point['type']
-        selector = test_point['selector']
-        priority = test_point['priority']
-        
-        # 优化选择器，避开动态ID
-        optimized_selector = optimize_selector(test_point)
-        
-        # 生成测试方法
-        test_method = f"""
-    @pytest.mark.{priority}
-    def test_{test_id}(self, page):
-        '''测试{element_type}元素: {test_id}'''
+    def _auto_login(self, page):
+        """统一封装登录逻辑"""
+        username = "{}"
+        password = "{}"
+        if not username or not password:
+            return
+
         try:
-            test_page_url = "{test_point.get('page_url', url)}"
-            logger.info("开始测试: " + "{test_id}" + " - " + "{element_type}" + " - 页面: " + test_page_url)
+            page.goto("{}")
+            page.wait_for_load_state('networkidle', timeout={} * 1000)
 
+            # 优先使用placeholder匹配，更通用
+            username_selector = "input[placeholder*='用户名'], input[placeholder*='账号'], input[placeholder*='邮箱'], input[name='username'], input#username, input[type='text']"
+            password_selector = "input[placeholder*='密码'], input[name='password'], input#password, input[type='password']"
+            login_button_selector = "button[type='submit'], input[type='submit'], button:has-text('登录'), button:has-text('Login')"
+
+            # 等待登录输入框出现，最多等3秒
+            login_input = page.wait_for_selector(username_selector, timeout=3000)
+            if login_input and login_input.is_visible():
+                # 填充账号密码
+                page.fill(username_selector, username)
+                page.fill(password_selector, password)
+                # 点击登录按钮
+                page.click(login_button_selector)
+                # 等待登录完成跳转
+                page.wait_for_load_state('networkidle', timeout=10000)
+                page.wait_for_timeout(2000)  # 额外等待页面稳定
+                logger.info("✅ 自动登录成功")
+        except Exception as e:
+            logger.info("ℹ️ 登录失败或无需登录: " + str(e))
+
+    def _run_element_test(self, page, test_case):
+        """统一测试执行逻辑"""
+        test_id = test_case['id']
+        element_type = test_case['type']
+        selector = test_case['selector']
+        page_url = test_case['page_url']
+        meta = test_case['meta']
+
+        logger.info(f'开始测试: {{test_id}} - {{element_type}} - 页面: {{page_url}}')
+
+        try:
             # 跳转到测试点所属页面
-            if test_page_url != page.url:
-                logger.info("🔄 跳转到测试页面: " + test_page_url)
-                page.goto(test_page_url)
-                page.wait_for_load_state('networkidle', timeout={page_load_timeout} * 1000)
+            if page_url != page.url:
+                logger.info(f'🔄 跳转到测试页面: {{page_url}}')
+                page.goto(page_url)
+                page.wait_for_load_state('networkidle', timeout={} * 1000)
 
-            if "{element_type}" == "button":
-                # 测试按钮点击
-                button = page.query_selector("{optimized_selector}")
-                assert button is not None, "元素未找到"
-                # 如果是登录按钮，先输入账号密码
-                if "login-btn" in "{optimized_selector}":
-                    # 输入用户名
-                    username_input = page.query_selector("input[placeholder='请输入用户名或邮箱']")
-                    if username_input:
-                        username_input.fill("{username}")
-                        page.wait_for_timeout(500)
-                    # 输入密码
-                    password_input = page.query_selector("input[placeholder='请输入密码']")
-                    if password_input:
-                        password_input.fill("{password}")
-                        page.wait_for_timeout(500)
+            # 根据元素类型执行对应测试
+            if element_type == "button":
+                button = page.query_selector(selector)
+                assert button is not None, "按钮元素未找到"
                 button.click()
-                page.wait_for_load_state('networkidle', timeout={page_load_timeout} * 1000)
-                logger.info("测试通过: " + "{test_id}" + " - 按钮点击成功")
-            
-            elif "{element_type}" == "input":
-                # 测试输入框
-                input_elem = page.query_selector("{optimized_selector}")
-                assert input_elem is not None, "元素未找到"
+                page.wait_for_load_state('networkidle', timeout={} * 1000)
+                logger.info(f'测试通过: {{test_id}} - 按钮点击成功')
+
+            elif element_type == "input":
+                input_elem = page.query_selector(selector)
+                assert input_elem is not None, "输入框元素未找到"
                 input_elem.fill('测试输入')
                 page.wait_for_timeout(1000)
-                # 验证输入是否成功
                 input_value = input_elem.input_value()
-                assert input_value == '测试输入', "输入失败 - 期望值: '测试输入', 实际值: '" + input_value + "'"
-                logger.info("测试通过: " + "{test_id}" + " - 输入框填写成功")
-            
-            elif "{element_type}" == "link":
-                # 测试链接点击
-                link = page.query_selector("{optimized_selector}")
-                assert link is not None, "元素未找到"
-                # 记录点击前的URL
+                assert input_value == '测试输入', f'输入失败 - 期望值: "测试输入", 实际值: "{{input_value}}"'
+                logger.info(f'测试通过: {{test_id}} - 输入框填写成功')
+
+            elif element_type == "link":
+                link = page.query_selector(selector)
+                assert link is not None, "链接元素未找到"
                 before_url = page.url
                 link.click()
-                # 等待页面导航
-                page.wait_for_load_state('networkidle', timeout={page_load_timeout} * 1000)
-                after_url = page.url
-                logger.info("测试通过: " + "{test_id}" + " - 链接点击成功")
-            
-            elif "{element_type}" in ["checkbox", "radio"]:
-                # 测试复选框和单选按钮
-                input_elem = page.query_selector("{optimized_selector}")
-                assert input_elem is not None, "元素未找到"
+                page.wait_for_load_state('networkidle', timeout={} * 1000)
+                logger.info(f'测试通过: {{test_id}} - 链接点击成功')
+
+            elif element_type in ["checkbox", "radio"]:
+                input_elem = page.query_selector(selector)
+                assert input_elem is not None, f'{{element_type}}元素未找到'
                 input_elem.click()
                 page.wait_for_timeout(1000)
-                # 验证是否选中
                 is_checked = input_elem.is_checked()
-                assert is_checked, "{element_type}未选中"
-                logger.info("测试通过: " + "{test_id}" + " - " + "{element_type}" + "选中成功")
-            
-            elif "{element_type}" == "select":
-                # 测试下拉菜单
-                select_elem = page.query_selector("{optimized_selector}")
-                assert select_elem is not None, "元素未找到"
-                # 选择第一个选项
+                assert is_checked, f'{{element_type}}未选中'
+                logger.info(f'测试通过: {{test_id}} - {{element_type}}选中成功')
+
+            elif element_type == "select":
+                select_elem = page.query_selector(selector)
+                assert select_elem is not None, "下拉菜单元素未找到"
                 select_elem.select_option(index=0)
                 page.wait_for_timeout(1000)
-                # 验证选择是否成功
                 selected_value = select_elem.input_value()
                 assert selected_value, "下拉菜单选择失败"
-                logger.info("测试通过: " + "{test_id}" + " - 下拉菜单选择成功，选中值: " + selected_value)
-            
-            elif "{element_type}" == "textarea":
-                # 测试文本域
-                textarea_elem = page.query_selector("{optimized_selector}")
-                assert textarea_elem is not None, "元素未找到"
-                # 填写文本
+                logger.info(f'测试通过: {{test_id}} - 下拉菜单选择成功')
+
+            elif element_type == "textarea":
+                textarea_elem = page.query_selector(selector)
+                assert textarea_elem is not None, "文本域元素未找到"
                 test_text = '测试文本内容'
                 textarea_elem.fill(test_text)
                 page.wait_for_timeout(1000)
-                # 验证填写是否成功
                 textarea_value = textarea_elem.input_value()
-                assert textarea_value == test_text, "文本域填写失败 - 期望值: '" + test_text + "', 实际值: '" + textarea_value + "'"
-                logger.info("测试通过: " + "{test_id}" + " - 文本域填写成功")
-            
-            elif "{element_type}" == "form":
-                # 测试表单
-                form_elem = page.query_selector("{optimized_selector}")
-                assert form_elem is not None, "元素未找到"
-                # 检查表单是否存在提交按钮
-                submit_button = form_elem.query_selector('button[type="submit"], input[type="submit"]')
-                if submit_button:
-                    logger.info("表单包含提交按钮")
-                else:
-                    logger.info("表单不包含提交按钮")
-                logger.info("测试通过: " + "{test_id}" + " - 表单分析成功")
-                
+                assert textarea_value == test_text, f'文本域填写失败 - 期望值: "{{test_text}}", 实际值: "{{textarea_value}}"'
+                logger.info(f'测试通过: {{test_id}} - 文本域填写成功')
+
+            elif element_type == "form":
+                form_elem = page.query_selector(selector)
+                assert form_elem is not None, "表单元素未找到"
+                logger.info(f'测试通过: {{test_id}} - 表单元素存在')
+
+            else:
+                logger.info(f'测试通过: {{test_id}} - {{element_type}}元素存在')
+
         except Exception as e:
-            logger.error("测试失败: " + "{test_id}" + " - " + str(e))
+            logger.error(f'测试失败: {{test_id}} - {{element_type}} - {{str(e)}}')
             # 尝试截图
             try:
-                screenshot_dir = '{screenshot_dir}'
+                screenshot_dir = '{}'
                 os.makedirs(screenshot_dir, exist_ok=True)
-                screenshot_path = os.path.join(screenshot_dir, "test_{test_id}_failure.png")
+                screenshot_path = os.path.join(screenshot_dir, f'test_{{test_id}}_failure.png')
                 page.screenshot(path=screenshot_path)
-                logger.info("已保存失败截图: " + screenshot_path)
+                logger.info(f'已保存失败截图: {{screenshot_path}}')
             except Exception as screenshot_error:
-                logger.warning("截图失败: " + str(screenshot_error))
+                logger.warning(f'截图失败: {{str(screenshot_error)}}')
             raise
-""".format(
-            test_id=test_id,
-            element_type=element_type,
-            selector=selector,
-            optimized_selector=optimized_selector,
-            priority=priority,
-            page_load_timeout=page_load_timeout,
-            screenshot_dir=screenshot_dir,
-            username=username if username else "test002",
-            password=password if password else "123456"
-        )
-        
-        test_file_content += test_method
-    
+
+    # 参数化测试用例
+    @pytest.mark.parametrize("test_case", {}, ids=lambda x: x['id'])
+    def test_element(self, page, test_case):
+        """参数化测试入口"""
+        self._run_element_test(page, test_case)
+'''.format(
+        log_level.upper(),
+        browser_type,
+        headless,
+        page_load_timeout,
+        username if username else "test002",
+        password if password else "123456",
+        url,
+        page_load_timeout,
+        page_load_timeout,
+        page_load_timeout,
+        page_load_timeout,
+        screenshot_dir,
+        test_cases
+    ).strip()
+
     # 写入测试文件
     test_file_path = os.path.join('tests', 'test_page_elements.py')
     with open(test_file_path, 'w', encoding='utf-8') as f:
         f.write(test_file_content)
-    
+
+    print(f"✅ 已生成参数化测试文件，共 {len(filtered_test_points)} 个登录后页面测试点")
     return test_file_path

@@ -36,23 +36,44 @@ class PageAnalyzer:
                     # 适配登录页选择器，根据实际情况修改
                     try:
                         # 等待用户名输入框出现（判断是否在登录页）
-                        page.wait_for_selector("input[type='text'], input[name='username'], input#username", timeout=3000)
+                        # 优先使用placeholder匹配，更通用
+                        username_selector = "input[placeholder*='用户名'], input[placeholder*='账号'], input[placeholder*='邮箱'], input[name='username'], input#username, input[type='text']"
+                        password_selector = "input[placeholder*='密码'], input[name='password'], input#password, input[type='password']"
+
+                        page.wait_for_selector(username_selector, timeout=3000)
                         # 填充账号密码
-                        page.fill("input[type='text'], input[name='username'], input#username", self.username)
-                        page.fill("input[type='password'], input[name='password'], input#password", self.password)
+                        page.fill(username_selector, self.username)
+                        page.fill(password_selector, self.password)
                         # 点击登录按钮
                         login_button_selector = "button[type='submit'], input[type='submit'], button:has-text('登录'), button:has-text('Login')"
                         page.click(login_button_selector)
-                        # 等待登录完成跳转
-                        page.wait_for_navigation(timeout=10000)
-                        print("✅ 自动登录成功")
+                        # 等待登录完成跳转，最多等待5秒检查URL变化
+                        login_success = False
+                        for _ in range(10):
+                            page.wait_for_timeout(500)
+                            current_url = page.url
+                            if 'dashboard' in current_url.lower() or 'login' not in current_url.lower():
+                                login_success = True
+                                break
+
+                        page.wait_for_load_state('networkidle', timeout=5000)
+                        page.wait_for_timeout(1000)
+
+                        if login_success:
+                            print(f"✅ 自动登录成功，已跳转到: {page.url}")
+                        else:
+                            print(f"⚠️  登录后URL未变化，当前页面: {page.url}")
                     except Exception as e:
                         print(f"ℹ️ 未检测到登录页或登录失败: {str(e)}")
                 # ======================================
 
-                # 开始多页面分析
+                # 登录完成后，获取当前页面URL（可能已经跳转到首页/dashboard）
+                current_url = page.url
+                print(f"🔍 登录后当前页面: {current_url}")
                 print(f"🔍 开始多页面分析，最大分析页面数: {self.max_pages}")
-                self._analyze_single_page(page, page.url)
+                # 清空登录页面分析的测试点（如果有的话）
+                self.test_points = []
+                self._analyze_single_page(page, current_url)
 
                 # 对测试点进行排序
                 self._sort_test_points()
@@ -69,6 +90,7 @@ class PageAnalyzer:
 
     def _analyze_single_page(self, page, current_url):
         """分析单个页面的元素，并收集内部链接"""
+        # 暂时取消登录页面过滤，确保能分析到元素
         if current_url in self.visited_urls or self.current_pages >= self.max_pages:
             return
 
@@ -84,27 +106,34 @@ class PageAnalyzer:
             # 分析当前页面的可交互元素
             self._analyze_interactive_elements(page, current_url)
 
-            # 收集页面上的所有内部链接
-            links = page.query_selector_all('a')
+            # 收集页面上的所有内部链接，包括标准<a>标签和动态路由链接
+            links = page.query_selector_all('a, [href], [to], [router-link]')
             internal_links = []
 
             for link in links:
                 try:
-                    href = link.get_attribute('href') or ''
+                    # 尝试获取不同属性的链接
+                    href = link.get_attribute('href') or link.get_attribute('to') or ''
                     if href:
                         # 解析链接，判断是否为内部链接
                         parsed_href = urlparse(href)
                         absolute_url = urljoin(current_url, href)
                         parsed_absolute = urlparse(absolute_url)
 
-                        # 只处理同域名的http/https链接，排除锚点、邮件、下载等链接
+                        # 只处理同域名的http/https链接，排除静态资源和非页面链接
+                        static_extensions = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico',
+                                            '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.mp3', '.pdf',
+                                            '.zip', '.rar', '.7z', '.exe', '.doc', '.docx', '.xls', '.xlsx')
+
                         if (parsed_absolute.netloc == self.base_domain
                             and parsed_absolute.scheme in ['http', 'https']
                             and not parsed_absolute.fragment
                             and not href.startswith('mailto:')
                             and not href.startswith('tel:')
                             and not href.startswith('javascript:')
-                            and not href.endswith(('.pdf', '.zip', '.exe', '.doc', '.xls'))):
+                            and not href.startswith('#')
+                            and not any(href.lower().endswith(ext) for ext in static_extensions)
+                            and not any(parsed_absolute.path.lower().endswith(ext) for ext in static_extensions)):
 
                             if absolute_url not in self.visited_urls:
                                 internal_links.append(absolute_url)
@@ -114,6 +143,7 @@ class PageAnalyzer:
 
             # 去重
             internal_links = list(set(internal_links))
+            print(f"🔗 当前页面找到 {len(internal_links)} 个内部链接")
 
             # 递归分析内部链接
             for link in internal_links:
@@ -129,19 +159,36 @@ class PageAnalyzer:
             self.logger.warning(f"分析页面失败 {current_url}: {str(e)}")
     
     def _analyze_interactive_elements(self, page, page_url):
-        """分析页面中的可交互元素"""
+        """分析页面中的可交互元素 - 优化：去重+过滤无意义元素"""
+        # 用于去重的集合
+        unique_elements = set()
+
         # 分析按钮元素
         buttons = page.query_selector_all('button')
         for button in buttons:
             try:
                 text = button.text_content().strip() if button.text_content() else ''
                 selector = button.evaluate('(el) => el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ``) + (el.className ? `.${el.className.split(" ").join(".")}` : ``)')
+
+                # 过滤无意义的按钮
+                useless_keywords = ['close', '关闭', 'collapse', '折叠', 'bell', '通知', 'tooltip', '提示',
+                                'drawer__close', 'el-drawer__close', 'el-tooltip', 'action-btn']
+                is_useless = any(keyword in selector.lower() for keyword in useless_keywords)
+                if is_useless and not text:
+                    continue
+
+                # 去重：相同页面+相同选择器只保留一个
+                element_key = f"{page_url}|{selector}"
+                if element_key in unique_elements:
+                    continue
+                unique_elements.add(element_key)
+
                 self.test_points.append({
                     'type': 'button',
                     'text': text,
                     'selector': selector,
                     'priority': self._calculate_priority('button', text),
-                    'page_url': page_url  # 添加所属页面URL
+                    'page_url': page_url
                 })
             except Exception as e:
                 self.logger.warning(f"分析按钮元素失败: {str(e)}")
@@ -154,6 +201,16 @@ class PageAnalyzer:
                 placeholder = input_elem.get_attribute('placeholder') or ''
                 selector = input_elem.evaluate('(el) => el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ``) + (el.className ? `.${el.className.split(" ").join(".")}` : ``)')
 
+                # 过滤无意义的输入框（隐藏、搜索、下拉内部输入框等）
+                if input_type in ['hidden', 'search', 'file'] or 'el-select__input' in selector.lower():
+                    continue
+
+                # 去重
+                element_key = f"{page_url}|{selector}"
+                if element_key in unique_elements:
+                    continue
+                unique_elements.add(element_key)
+
                 # 根据输入类型进行分类
                 if input_type in ['checkbox', 'radio']:
                     # 复选框和单选按钮
@@ -165,7 +222,7 @@ class PageAnalyzer:
                         'value': value,
                         'selector': selector,
                         'priority': self._calculate_priority(input_type, name),
-                        'page_url': page_url  # 添加所属页面URL
+                        'page_url': page_url
                     })
                 else:
                     # 普通输入框
@@ -175,7 +232,7 @@ class PageAnalyzer:
                         'placeholder': placeholder,
                         'selector': selector,
                         'priority': self._calculate_priority('input', placeholder),
-                        'page_url': page_url  # 添加所属页面URL
+                        'page_url': page_url
                     })
             except Exception as e:
                 self.logger.warning(f"分析输入框元素失败: {str(e)}")
@@ -187,13 +244,24 @@ class PageAnalyzer:
                 text = link.text_content().strip() if link.text_content() else ''
                 href = link.get_attribute('href') or ''
                 selector = link.evaluate('(el) => el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ``) + (el.className ? `.${el.className.split(" ").join(".")}` : ``)')
+
+                # 过滤空文本和无意义链接
+                if not text and not href:
+                    continue
+
+                # 去重
+                element_key = f"{page_url}|{selector}"
+                if element_key in unique_elements:
+                    continue
+                unique_elements.add(element_key)
+
                 self.test_points.append({
                     'type': 'link',
                     'text': text,
                     'href': href,
                     'selector': selector,
                     'priority': self._calculate_priority('link', text),
-                    'page_url': page_url  # 添加所属页面URL
+                    'page_url': page_url
                 })
             except Exception as e:
                 self.logger.warning(f"分析链接元素失败: {str(e)}")
@@ -208,6 +276,13 @@ class PageAnalyzer:
                 # 获取选项数量
                 options = select.query_selector_all('option')
                 option_count = len(options)
+
+                # 去重
+                element_key = f"{page_url}|{selector}"
+                if element_key in unique_elements:
+                    continue
+                unique_elements.add(element_key)
+
                 self.test_points.append({
                     'type': 'select',
                     'name': name,
@@ -215,7 +290,7 @@ class PageAnalyzer:
                     'option_count': option_count,
                     'selector': selector,
                     'priority': self._calculate_priority('select', name),
-                    'page_url': page_url  # 添加所属页面URL
+                    'page_url': page_url
                 })
             except Exception as e:
                 self.logger.warning(f"分析下拉菜单元素失败: {str(e)}")
@@ -227,13 +302,20 @@ class PageAnalyzer:
                 name = textarea.get_attribute('name') or ''
                 placeholder = textarea.get_attribute('placeholder') or ''
                 selector = textarea.evaluate('(el) => el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ``) + (el.className ? `.${el.className.split(" ").join(".")}` : ``)')
+
+                # 去重
+                element_key = f"{page_url}|{selector}"
+                if element_key in unique_elements:
+                    continue
+                unique_elements.add(element_key)
+
                 self.test_points.append({
                     'type': 'textarea',
                     'name': name,
                     'placeholder': placeholder,
                     'selector': selector,
                     'priority': self._calculate_priority('textarea', name),
-                    'page_url': page_url  # 添加所属页面URL
+                    'page_url': page_url
                 })
             except Exception as e:
                 self.logger.warning(f"分析文本域元素失败: {str(e)}")
@@ -245,32 +327,51 @@ class PageAnalyzer:
                 action = form.get_attribute('action') or ''
                 method = form.get_attribute('method') or 'get'
                 selector = form.evaluate('(el) => el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ``) + (el.className ? `.${el.className.split(" ").join(".")}` : ``)')
+
+                # 去重
+                element_key = f"{page_url}|{selector}"
+                if element_key in unique_elements:
+                    continue
+                unique_elements.add(element_key)
+
                 self.test_points.append({
                     'type': 'form',
                     'action': action,
                     'method': method,
                     'selector': selector,
                     'priority': self._calculate_priority('form', action),
-                    'page_url': page_url  # 添加所属页面URL
+                    'page_url': page_url
                 })
             except Exception as e:
                 self.logger.warning(f"分析表单元素失败: {str(e)}")
     
     def _calculate_priority(self, element_type, text):
-        """计算元素的优先级"""
-        high_priority_keywords = ['提交', '登录', '删除', '保存', '确认', '搜索']
-        medium_priority_keywords = ['编辑', '修改', '查看', '详情', '返回']
-        
+        """计算元素的优先级 - 优化：更合理的优先级判断"""
+        high_priority_keywords = ['提交', '登录', '删除', '保存', '确认', '搜索', '发送', '发布',
+                                '创建', '新增', '确定', '同意', '拒绝', '审核', '提交']
+        medium_priority_keywords = ['编辑', '修改', '查看', '详情', '返回', '导出', '导入',
+                                    '下载', '上传', '重置', '取消', '预览']
+
         text_lower = text.lower()
-        
-        for keyword in high_priority_keywords:
-            if keyword in text:
-                return 'high'
-        
-        for keyword in medium_priority_keywords:
-            if keyword in text:
-                return 'medium'
-        
+
+        # 有文本的按钮优先级更高
+        if element_type == 'button' and text:
+            for keyword in high_priority_keywords:
+                if keyword in text:
+                    return 'high'
+            for keyword in medium_priority_keywords:
+                if keyword in text:
+                    return 'medium'
+            return 'medium'  # 只要有文本的按钮至少是medium优先级
+
+        # 有placeholder的输入框优先级更高
+        if element_type in ['input', 'textarea'] and text:
+            return 'medium'
+
+        # 有文本的链接优先级更高
+        if element_type == 'link' and text:
+            return 'medium'
+
         return 'low'
     
     def _sort_test_points(self):
