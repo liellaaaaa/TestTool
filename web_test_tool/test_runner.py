@@ -196,8 +196,66 @@ class TestRunner:
                                 password_input.fill(self.password)
                                 page.wait_for_timeout(500)
                                 self.logger.info("已输入密码")
+
+                        # 点击前记录当前状态
+                        before_url = page.url
+
                         button.click()
-                        # 等待可能的页面变化
+
+                        # 根据按钮文本做针对性等待
+                        button_text_lower = button_text.lower()
+                        wait_success = False
+
+                        # 1. 新建/添加/创建类按钮：等待弹窗出现
+                        if any(keyword in button_text_lower for keyword in ['新建', '添加', '创建', '新增', 'new', 'add', 'create']):
+                            try:
+                                # 等待弹窗类元素出现（适配element-ui等常见框架）
+                                page.wait_for_selector('.el-dialog, .modal, .dialog, .popup', timeout=3000)
+                                self.logger.info(f"✅ 点击后弹窗成功弹出")
+                                wait_success = True
+                            except:
+                                self.logger.info(f"ℹ️ 点击后未检测到弹窗，可能为其他操作")
+
+                        # 2. 提交/保存/确认类按钮：等待成功提示或页面跳转
+                        elif any(keyword in button_text_lower for keyword in ['提交', '保存', '确认', '确定', 'submit', 'save', 'confirm']):
+                            try:
+                                # 先等待成功提示
+                                page.wait_for_selector('.el-message, .message, .notification, .toast', timeout=3000)
+                                self.logger.info(f"✅ 点击后出现成功提示")
+                                wait_success = True
+                            except:
+                                # 没有提示则等待页面跳转
+                                try:
+                                    page.wait_for_url(lambda url: url != before_url, timeout=3000)
+                                    self.logger.info(f"✅ 点击后成功跳转到新页面: {page.url}")
+                                    wait_success = True
+                                except:
+                                    self.logger.info(f"ℹ️ 点击后未检测到提示或跳转")
+
+                        # 3. 搜索/查询/筛选类按钮：等待列表加载
+                        elif any(keyword in button_text_lower for keyword in ['搜索', '查询', '筛选', '查找', 'search', 'query', 'filter']):
+                            try:
+                                # 等待列表类元素加载完成
+                                page.wait_for_selector('.el-table, .table, .list, .grid', timeout=3000)
+                                self.logger.info(f"✅ 点击后列表成功加载")
+                                wait_success = True
+                            except:
+                                self.logger.info(f"ℹ️ 点击后未检测到列表变化")
+
+                        # 4. 下一页/上一页/翻页类按钮：等待URL参数变化或列表刷新
+                        elif any(keyword in button_text_lower for keyword in ['下一页', '上一页', '翻页', '分页', 'page', 'next', 'prev']):
+                            try:
+                                page.wait_for_url(lambda url: url != before_url, timeout=3000)
+                                self.logger.info(f"✅ 点击后成功翻页，新URL: {page.url}")
+                                wait_success = True
+                            except:
+                                self.logger.info(f"ℹ️ 点击后未检测到翻页")
+
+                        # 其他按钮：至少等待1秒让动态操作完成
+                        if not wait_success:
+                            page.wait_for_timeout(1000)
+
+                        # 统一等待网络空闲
                         page.wait_for_load_state('networkidle', timeout=self.page_load_timeout * 1000)
                         self.logger.info(f"测试通过: {test_id} - 按钮点击成功")
                     else:
@@ -233,14 +291,20 @@ class TestRunner:
                         self.logger.info(f"找到链接: {link_text}, 目标: {href}")
                         # 记录点击前的URL
                         before_url = page.url
+
                         link.click()
-                        # 等待页面导航
-                        page.wait_for_load_state('networkidle', timeout=30000)
-                        after_url = page.url
-                        if after_url != before_url:
-                            self.logger.info(f"测试通过: {test_id} - 链接点击成功，导航到: {after_url}")
-                        else:
-                            self.logger.info(f"测试通过: {test_id} - 链接点击成功，但未导航")
+
+                        # 等待页面导航完成，最多等5秒
+                        try:
+                            page.wait_for_url(lambda url: url != before_url, timeout=5000)
+                            after_url = page.url
+                            self.logger.info(f"✅ 链接点击成功，跳转到: {after_url}")
+                        except:
+                            # 没有跳转则等待动态内容加载
+                            page.wait_for_load_state('networkidle', timeout=3000)
+                            self.logger.info(f"ℹ️ 链接点击成功，未发生页面跳转（可能为内部路由或js操作）")
+
+                        self.logger.info(f"测试通过: {test_id} - 链接点击成功")
                     else:
                         raise Exception(f"元素未找到 - 选择器: {selector}")
                 

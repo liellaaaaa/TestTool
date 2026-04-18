@@ -222,14 +222,90 @@ class TestPageElements:
 
             # 根据元素类型执行对应测试
             if element_type == "button":
-                button = page.query_selector(selector)
+                button = page.wait_for_selector(selector, timeout=5000)  # 最多等待5秒元素出现
                 assert button is not None, "按钮元素未找到"
+                # 获取按钮文本
+                button_text = button.text_content().strip() if button.text_content() else '无文本'
+                logger.info(f"找到按钮: {button_text}")
+                # 如果是登录按钮，先输入账号密码
+                if "login-btn" in selector:
+                    # 输入用户名
+                    username_input = page.query_selector("input[placeholder='请输入用户名或邮箱']")
+                    if username_input:
+                        username_input.fill("{username}")
+                        page.wait_for_timeout(500)
+                        logger.info(f"已输入用户名: {{username}}")
+                    # 输入密码
+                    password_input = page.query_selector("input[placeholder='请输入密码']")
+                    if password_input:
+                        password_input.fill("{password}")
+                        page.wait_for_timeout(500)
+                        logger.info("已输入密码")
+
+                # 点击前记录当前状态
+                before_url = page.url
+
                 button.click()
-                page.wait_for_load_state('networkidle', timeout={} * 1000)
+
+                # 根据按钮文本做针对性等待
+                button_text_lower = button_text.lower()
+                wait_success = False
+
+                # 1. 新建/添加/创建类按钮：等待弹窗出现
+                if any(keyword in button_text_lower for keyword in ['新建', '添加', '创建', '新增', 'new', 'add', 'create']):
+                    try:
+                        # 等待弹窗类元素出现（适配element-ui等常见框架）
+                        page.wait_for_selector('.el-dialog, .modal, .dialog, .popup', timeout=3000)
+                        logger.info(f"✅ 点击后弹窗成功弹出")
+                        wait_success = True
+                    except:
+                        logger.info(f"ℹ️ 点击后未检测到弹窗，可能为其他操作")
+
+                # 2. 提交/保存/确认类按钮：等待成功提示或页面跳转
+                elif any(keyword in button_text_lower for keyword in ['提交', '保存', '确认', '确定', 'submit', 'save', 'confirm']):
+                    try:
+                        # 先等待成功提示
+                        page.wait_for_selector('.el-message, .message, .notification, .toast', timeout=3000)
+                        logger.info(f"✅ 点击后出现成功提示")
+                        wait_success = True
+                    except:
+                        # 没有提示则等待页面跳转
+                        try:
+                            page.wait_for_url(lambda url: url != before_url, timeout=3000)
+                            logger.info(f"✅ 点击后成功跳转到新页面: {page.url}")
+                            wait_success = True
+                        except:
+                            logger.info(f"ℹ️ 点击后未检测到提示或跳转")
+
+                # 3. 搜索/查询/筛选类按钮：等待列表加载
+                elif any(keyword in button_text_lower for keyword in ['搜索', '查询', '筛选', '查找', 'search', 'query', 'filter']):
+                    try:
+                        # 等待列表类元素加载完成
+                        page.wait_for_selector('.el-table, .table, .list, .grid', timeout=3000)
+                        logger.info(f"✅ 点击后列表成功加载")
+                        wait_success = True
+                    except:
+                        logger.info(f"ℹ️ 点击后未检测到列表变化")
+
+                # 4. 下一页/上一页/翻页类按钮：等待URL参数变化或列表刷新
+                elif any(keyword in button_text_lower for keyword in ['下一页', '上一页', '翻页', '分页', 'page', 'next', 'prev']):
+                    try:
+                        page.wait_for_url(lambda url: url != before_url, timeout=3000)
+                        logger.info(f"✅ 点击后成功翻页，新URL: {page.url}")
+                        wait_success = True
+                    except:
+                        logger.info(f"ℹ️ 点击后未检测到翻页")
+
+                # 其他按钮：至少等待1秒让动态操作完成
+                if not wait_success:
+                    page.wait_for_timeout(1000)
+
+                # 统一等待网络空闲
+                page.wait_for_load_state('networkidle', timeout={page_load_timeout} * 1000)
                 logger.info(f'测试通过: {{test_id}} - 按钮点击成功')
 
             elif element_type == "input":
-                input_elem = page.query_selector(selector)
+                input_elem = page.wait_for_selector(selector, timeout=5000)
                 assert input_elem is not None, "输入框元素未找到"
                 input_elem.fill('测试输入')
                 page.wait_for_timeout(1000)
@@ -238,15 +314,31 @@ class TestPageElements:
                 logger.info(f'测试通过: {{test_id}} - 输入框填写成功')
 
             elif element_type == "link":
-                link = page.query_selector(selector)
+                link = page.wait_for_selector(selector, timeout=5000)
                 assert link is not None, "链接元素未找到"
+                # 获取链接文本和href
+                link_text = link.text_content().strip() if link.text_content() else '无文本'
+                href = link.get_attribute('href') or '无链接'
+                logger.info(f"找到链接: {link_text}, 目标: {href}")
+                # 记录点击前的URL
                 before_url = page.url
+
                 link.click()
-                page.wait_for_load_state('networkidle', timeout={} * 1000)
+
+                # 等待页面导航完成，最多等5秒
+                try:
+                    page.wait_for_url(lambda url: url != before_url, timeout=5000)
+                    after_url = page.url
+                    logger.info(f"✅ 链接点击成功，跳转到: {after_url}")
+                except:
+                    # 没有跳转则等待动态内容加载
+                    page.wait_for_load_state('networkidle', timeout=3000)
+                    logger.info(f"ℹ️ 链接点击成功，未发生页面跳转（可能为内部路由或js操作）")
+
                 logger.info(f'测试通过: {{test_id}} - 链接点击成功')
 
             elif element_type in ["checkbox", "radio"]:
-                input_elem = page.query_selector(selector)
+                input_elem = page.wait_for_selector(selector, timeout=5000)
                 assert input_elem is not None, f'{{element_type}}元素未找到'
                 input_elem.click()
                 page.wait_for_timeout(1000)
@@ -255,7 +347,7 @@ class TestPageElements:
                 logger.info(f'测试通过: {{test_id}} - {{element_type}}选中成功')
 
             elif element_type == "select":
-                select_elem = page.query_selector(selector)
+                select_elem = page.wait_for_selector(selector, timeout=5000)
                 assert select_elem is not None, "下拉菜单元素未找到"
                 select_elem.select_option(index=0)
                 page.wait_for_timeout(1000)
@@ -264,7 +356,7 @@ class TestPageElements:
                 logger.info(f'测试通过: {{test_id}} - 下拉菜单选择成功')
 
             elif element_type == "textarea":
-                textarea_elem = page.query_selector(selector)
+                textarea_elem = page.wait_for_selector(selector, timeout=5000)
                 assert textarea_elem is not None, "文本域元素未找到"
                 test_text = '测试文本内容'
                 textarea_elem.fill(test_text)
@@ -274,7 +366,7 @@ class TestPageElements:
                 logger.info(f'测试通过: {{test_id}} - 文本域填写成功')
 
             elif element_type == "form":
-                form_elem = page.query_selector(selector)
+                form_elem = page.wait_for_selector(selector, timeout=5000)
                 assert form_elem is not None, "表单元素未找到"
                 logger.info(f'测试通过: {{test_id}} - 表单元素存在')
 
