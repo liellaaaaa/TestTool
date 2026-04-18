@@ -124,8 +124,9 @@ class TestRunner:
         test_id = test_point['id']
         element_type = test_point['type']
         selector = test_point['selector']
-        self.logger.info(f"开始测试: {test_id} - {element_type} - 选择器: {selector}")
-        
+        page_url = test_point.get('page_url', self.url)  # 获取测试点所属页面URL，默认使用初始URL
+        self.logger.info(f"开始测试: {test_id} - {element_type} - 页面: {page_url} - 选择器: {selector}")
+
         try:
             with sync_playwright() as p:
                 # 根据配置选择浏览器
@@ -133,10 +134,34 @@ class TestRunner:
                 page = browser.new_page()
                 # 设置超时时间
                 page.set_default_timeout(self.page_load_timeout * 1000)
+
+                # 先访问登录页面并登录
                 page.goto(self.url)
-                
-                # 等待页面加载完成
                 page.wait_for_load_state('networkidle', timeout=self.page_load_timeout * 1000)
+
+                # 自动登录（如果有账号密码）
+                if self.username and self.password:
+                    try:
+                        # 检查是否在登录页
+                        login_input = page.query_selector("input[type='text'], input[name='username'], input#username")
+                        if login_input and login_input.is_visible():
+                            # 填充账号密码
+                            page.fill("input[type='text'], input[name='username'], input#username", self.username)
+                            page.fill("input[type='password'], input[name='password'], input#password", self.password)
+                            # 点击登录按钮
+                            login_button_selector = "button[type='submit'], input[type='submit'], button:has-text('登录'), button:has-text('Login')"
+                            page.click(login_button_selector)
+                            # 等待登录完成跳转
+                            page.wait_for_navigation(timeout=10000)
+                            self.logger.info("✅ 自动登录成功")
+                    except Exception as e:
+                        self.logger.info(f"ℹ️ 未检测到登录页或登录失败: {str(e)}")
+
+                # 跳转到测试点所属的页面
+                if page_url != page.url:
+                    self.logger.info(f"🔄 跳转到测试页面: {page_url}")
+                    page.goto(page_url)
+                    page.wait_for_load_state('networkidle', timeout=self.page_load_timeout * 1000)
                 
                 if element_type == 'button':
                     # 测试按钮点击
@@ -428,6 +453,7 @@ class TestRunner:
             <div class="test-item {status_class}">
                 <h3>{test_id} - {test_point['type']} - {test_point['priority']}优先级</h3>
                 <p><strong>状态:</strong> <span class="{status_class}">{status_text}</span></p>
+                <p><strong>所属页面:</strong> {test_point.get('page_url', '未知')}</p>
                 <p><strong>选择器:</strong> {test_point['selector']}</p>
 """
                 

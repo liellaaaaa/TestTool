@@ -1,5 +1,6 @@
 from playwright.sync_api import sync_playwright
 import logging
+from urllib.parse import urlparse, urljoin
 
 class PageAnalyzer:
     def __init__(self, url, config=None, username=None, password=None):
@@ -13,9 +14,14 @@ class PageAnalyzer:
         self.browser_type = config.get('DEFAULT', 'browser', fallback='chromium') if config else 'chromium'
         self.headless = config.getboolean('DEFAULT', 'headless', fallback=False) if config else False
         self.page_load_timeout = int(config.get('DEFAULT', 'page_load_timeout', fallback='30')) if config else 30
+        # 多页面爬取配置
+        self.visited_urls = set()  # 已访问的URL集合
+        self.max_pages = int(config.get('DEFAULT', 'max_pages', fallback=20)) if config else 20  # 最大爬取页面数，防止无限爬取
+        self.current_pages = 0  # 当前已爬取页面数
+        self.base_domain = urlparse(url).netloc  # 基础域名，只爬取同域名页面
     
     def analyze_page(self):
-        """分析页面元素，生成测试点"""
+        """分析页面元素，生成测试点（支持多页面）"""
         try:
             with sync_playwright() as p:
                 # 根据配置选择浏览器
@@ -24,7 +30,7 @@ class PageAnalyzer:
                 # 设置超时时间
                 page.set_default_timeout(self.page_load_timeout * 1000)
                 page.goto(self.url)
-                
+
                 # ========== 新增自动登录逻辑 ==========
                 if self.username and self.password:
                     # 适配登录页选择器，根据实际情况修改
@@ -43,23 +49,86 @@ class PageAnalyzer:
                     except Exception as e:
                         print(f"ℹ️ 未检测到登录页或登录失败: {str(e)}")
                 # ======================================
-                
-                # 分析可交互元素
-                self._analyze_interactive_elements(page)
-                
+
+                # 开始多页面分析
+                print(f"🔍 开始多页面分析，最大分析页面数: {self.max_pages}")
+                self._analyze_single_page(page, page.url)
+
                 # 对测试点进行排序
                 self._sort_test_points()
-                
+
                 # 为测试点添加标识
                 self._add_test_identifiers()
-                
+
                 browser.close()
+                print(f"✅ 页面分析完成，共分析了 {self.current_pages} 个页面，生成 {len(self.test_points)} 个测试点")
                 return self.test_points
         except Exception as e:
             self.logger.error(f"页面分析失败: {str(e)}")
             return []
+
+    def _analyze_single_page(self, page, current_url):
+        """分析单个页面的元素，并收集内部链接"""
+        if current_url in self.visited_urls or self.current_pages >= self.max_pages:
+            return
+
+        # 标记为已访问
+        self.visited_urls.add(current_url)
+        self.current_pages += 1
+        print(f"📄 正在分析页面 {self.current_pages}/{self.max_pages}: {current_url}")
+
+        try:
+            # 等待页面加载完成
+            page.wait_for_load_state('networkidle', timeout=self.page_load_timeout * 1000)
+
+            # 分析当前页面的可交互元素
+            self._analyze_interactive_elements(page, current_url)
+
+            # 收集页面上的所有内部链接
+            links = page.query_selector_all('a')
+            internal_links = []
+
+            for link in links:
+                try:
+                    href = link.get_attribute('href') or ''
+                    if href:
+                        # 解析链接，判断是否为内部链接
+                        parsed_href = urlparse(href)
+                        absolute_url = urljoin(current_url, href)
+                        parsed_absolute = urlparse(absolute_url)
+
+                        # 只处理同域名的http/https链接，排除锚点、邮件、下载等链接
+                        if (parsed_absolute.netloc == self.base_domain
+                            and parsed_absolute.scheme in ['http', 'https']
+                            and not parsed_absolute.fragment
+                            and not href.startswith('mailto:')
+                            and not href.startswith('tel:')
+                            and not href.startswith('javascript:')
+                            and not href.endswith(('.pdf', '.zip', '.exe', '.doc', '.xls'))):
+
+                            if absolute_url not in self.visited_urls:
+                                internal_links.append(absolute_url)
+
+                except Exception as e:
+                    self.logger.warning(f"处理链接失败: {str(e)}")
+
+            # 去重
+            internal_links = list(set(internal_links))
+
+            # 递归分析内部链接
+            for link in internal_links:
+                if self.current_pages >= self.max_pages:
+                    break
+                try:
+                    page.goto(link)
+                    self._analyze_single_page(page, link)
+                except Exception as e:
+                    self.logger.warning(f"访问链接失败 {link}: {str(e)}")
+
+        except Exception as e:
+            self.logger.warning(f"分析页面失败 {current_url}: {str(e)}")
     
-    def _analyze_interactive_elements(self, page):
+    def _analyze_interactive_elements(self, page, page_url):
         """分析页面中的可交互元素"""
         # 分析按钮元素
         buttons = page.query_selector_all('button')
@@ -71,11 +140,12 @@ class PageAnalyzer:
                     'type': 'button',
                     'text': text,
                     'selector': selector,
-                    'priority': self._calculate_priority('button', text)
+                    'priority': self._calculate_priority('button', text),
+                    'page_url': page_url  # 添加所属页面URL
                 })
             except Exception as e:
                 self.logger.warning(f"分析按钮元素失败: {str(e)}")
-        
+
         # 分析输入框元素
         inputs = page.query_selector_all('input')
         for input_elem in inputs:
@@ -83,7 +153,7 @@ class PageAnalyzer:
                 input_type = input_elem.get_attribute('type') or 'text'
                 placeholder = input_elem.get_attribute('placeholder') or ''
                 selector = input_elem.evaluate('(el) => el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ``) + (el.className ? `.${el.className.split(" ").join(".")}` : ``)')
-                
+
                 # 根据输入类型进行分类
                 if input_type in ['checkbox', 'radio']:
                     # 复选框和单选按钮
@@ -94,7 +164,8 @@ class PageAnalyzer:
                         'name': name,
                         'value': value,
                         'selector': selector,
-                        'priority': self._calculate_priority(input_type, name)
+                        'priority': self._calculate_priority(input_type, name),
+                        'page_url': page_url  # 添加所属页面URL
                     })
                 else:
                     # 普通输入框
@@ -103,11 +174,12 @@ class PageAnalyzer:
                         'input_type': input_type,
                         'placeholder': placeholder,
                         'selector': selector,
-                        'priority': self._calculate_priority('input', placeholder)
+                        'priority': self._calculate_priority('input', placeholder),
+                        'page_url': page_url  # 添加所属页面URL
                     })
             except Exception as e:
                 self.logger.warning(f"分析输入框元素失败: {str(e)}")
-        
+
         # 分析链接元素
         links = page.query_selector_all('a')
         for link in links:
@@ -120,11 +192,12 @@ class PageAnalyzer:
                     'text': text,
                     'href': href,
                     'selector': selector,
-                    'priority': self._calculate_priority('link', text)
+                    'priority': self._calculate_priority('link', text),
+                    'page_url': page_url  # 添加所属页面URL
                 })
             except Exception as e:
                 self.logger.warning(f"分析链接元素失败: {str(e)}")
-        
+
         # 分析下拉菜单元素
         selects = page.query_selector_all('select')
         for select in selects:
@@ -141,11 +214,12 @@ class PageAnalyzer:
                     'id': id,
                     'option_count': option_count,
                     'selector': selector,
-                    'priority': self._calculate_priority('select', name)
+                    'priority': self._calculate_priority('select', name),
+                    'page_url': page_url  # 添加所属页面URL
                 })
             except Exception as e:
                 self.logger.warning(f"分析下拉菜单元素失败: {str(e)}")
-        
+
         # 分析文本域元素
         textareas = page.query_selector_all('textarea')
         for textarea in textareas:
@@ -158,11 +232,12 @@ class PageAnalyzer:
                     'name': name,
                     'placeholder': placeholder,
                     'selector': selector,
-                    'priority': self._calculate_priority('textarea', name)
+                    'priority': self._calculate_priority('textarea', name),
+                    'page_url': page_url  # 添加所属页面URL
                 })
             except Exception as e:
                 self.logger.warning(f"分析文本域元素失败: {str(e)}")
-        
+
         # 分析表单元素
         forms = page.query_selector_all('form')
         for form in forms:
@@ -175,7 +250,8 @@ class PageAnalyzer:
                     'action': action,
                     'method': method,
                     'selector': selector,
-                    'priority': self._calculate_priority('form', action)
+                    'priority': self._calculate_priority('form', action),
+                    'page_url': page_url  # 添加所属页面URL
                 })
             except Exception as e:
                 self.logger.warning(f"分析表单元素失败: {str(e)}")
@@ -213,6 +289,7 @@ class PageAnalyzer:
         print("-" * 80)
         for test_point in self.test_points:
             print(f"{test_point['id']} - {test_point['type']} - {test_point['priority']}优先级")
+            print(f"  所属页面: {test_point['page_url']}")
             if test_point['type'] == 'button':
                 print(f"  文本: {test_point['text']}")
             elif test_point['type'] == 'input':

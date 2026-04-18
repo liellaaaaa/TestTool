@@ -140,6 +140,27 @@ class TestPageElements:
             page.set_default_timeout({page_load_timeout} * 1000)
             page.goto("{url}")
             page.wait_for_load_state('networkidle', timeout={page_load_timeout} * 1000)
+
+            # 自动登录
+            username = "{username}"
+            password = "{password}"
+            if username and password:
+                try:
+                    # 检查是否在登录页
+                    login_input = page.query_selector("input[type='text'], input[name='username'], input#username")
+                    if login_input and login_input.is_visible():
+                        # 填充账号密码
+                        page.fill("input[type='text'], input[name='username'], input#username", username)
+                        page.fill("input[type='password'], input[name='password'], input#password", password)
+                        # 点击登录按钮
+                        login_button_selector = "button[type='submit'], input[type='submit'], button:has-text('登录'), button:has-text('Login')"
+                        page.click(login_button_selector)
+                        # 等待登录完成跳转
+                        page.wait_for_navigation(timeout=10000)
+                        logger.info("✅ 自动登录成功")
+                except Exception as e:
+                    logger.info(f"ℹ️ 未检测到登录页或登录失败: {str(e)}")
+
             yield page
             browser.close()
 
@@ -167,8 +188,15 @@ class TestPageElements:
     def test_{test_id}(self, page):
         '''测试{element_type}元素: {test_id}'''
         try:
-            logger.info("开始测试: " + "{test_id}" + " - " + "{element_type}")
-            
+            test_page_url = "{test_point.get('page_url', url)}"
+            logger.info("开始测试: " + "{test_id}" + " - " + "{element_type}" + " - 页面: " + test_page_url)
+
+            # 跳转到测试点所属页面
+            if test_page_url != page.url:
+                logger.info("🔄 跳转到测试页面: " + test_page_url)
+                page.goto(test_page_url)
+                page.wait_for_load_state('networkidle', timeout={page_load_timeout} * 1000)
+
             if "{element_type}" == "button":
                 # 测试按钮点击
                 button = page.query_selector("{optimized_selector}")
